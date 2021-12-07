@@ -311,7 +311,7 @@ def preprocess_true_boxes(true_boxes, input_shape, anchors, num_classes):
 
     Parameters
     ----------
-    true_boxes: array, shape=(m, T, 5)
+    true_boxes: array, shape=(m, T, 5) T为种类
         Absolute x_min, y_min, x_max, y_max, class_id relative to input_shape.
     input_shape: array-like, hw, multiples of 32
     anchors: array, shape=(N, 2), wh
@@ -335,31 +335,31 @@ def preprocess_true_boxes(true_boxes, input_shape, anchors, num_classes):
     m = true_boxes.shape[0]  # 图片数量
     # grid_shapes = [input_shape // {0: 32, 1: 16, 2: 8}[l] for l in range(num_layers)]
     grid_shapes = [input_shape // 8]
-    y_true = [np.zeros((m, grid_shapes[0], grid_shapes[1], len(anchor_mask), 5 + num_classes), dtype='float32')]
+    y_true = [np.zeros((m, grid_shapes[0], grid_shapes[1], len(anchor_mask[0]), 5 + num_classes), dtype='float32')]
 
     # Expand dim to apply broadcasting.
-    anchors = np.expand_dims(anchors, 0)
-    anchor_maxes = anchors / 2.
+    anchors = np.expand_dims(anchors, 0)  # dims = 1 3 2
+    anchor_maxes = anchors / 2.  # 这里还有3个anchor
     anchor_mins = -anchor_maxes
     valid_mask = boxes_wh[..., 0] > 0
 
     for b in range(m):
         # Discard zero rows.
-        wh = boxes_wh[b, valid_mask[b]]
+        wh = boxes_wh[b, valid_mask[b]] # t 2
         if len(wh) == 0: continue
         # Expand dim to apply broadcasting.
-        wh = np.expand_dims(wh, -2)
+        wh = np.expand_dims(wh, -2) # 1 t 2
         box_maxes = wh / 2.
-        box_mins = -box_maxes
+        box_mins = -box_maxes # 1 t 2
 
         # 计算交并比（IOU）
         intersect_mins = np.maximum(box_mins, anchor_mins)
         intersect_maxes = np.minimum(box_maxes, anchor_maxes)
         intersect_wh = np.maximum(intersect_maxes - intersect_mins, 0.)
         intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
-        box_area = wh[..., 0] * wh[..., 1]
-        anchor_area = anchors[..., 0] * anchors[..., 1]
-        iou = intersect_area / (box_area + anchor_area - intersect_area)
+        box_area = wh[..., 0] * wh[..., 1] # t 1
+        anchor_area = anchors[..., 0] * anchors[..., 1] # 1 3
+        iou = intersect_area / (box_area + anchor_area - intersect_area) # t 3
 
         # Find best anchor for each true box
         best_anchor = np.argmax(iou, axis=-1)
@@ -519,27 +519,25 @@ def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=False):
     m = K.shape(yolo_outputs)[0]  # batch size, tensor
     mf = K.cast(m, K.dtype(yolo_outputs))
 
-
-
-    object_mask = y_true[..., 4:5] #confidence
-    true_class_probs = y_true[..., 5:] #class
+    object_mask = y_true[..., 4:5]  # confidence
+    true_class_probs = y_true[..., 5:]  # class
 
     grid, raw_pred, pred_xy, pred_wh = yolo_head(yolo_outputs,
-                                                 anchors[anchor_mask], num_classes, input_shape, calc_loss=True)
+                                                 anchors[anchor_mask[0]], num_classes, input_shape, calc_loss=True)
     pred_box = K.concatenate([pred_xy, pred_wh])
 
     # Darknet raw box to calculate loss.
     raw_true_xy = y_true[..., :2] * grid_shapes[::-1] - grid
-    raw_true_wh = K.log(y_true[..., 2:4] / anchors[anchor_mask] * input_shape[::-1])
+    raw_true_wh = K.log(y_true[..., 2:4] / anchors[anchor_mask[0]] * input_shape[::-1])
     raw_true_wh = K.switch(object_mask, raw_true_wh, K.zeros_like(raw_true_wh))  # avoid log(0)=-inf
-    box_loss_scale = 2 - y_true[..., 2:3] * y_true[..., 3:4]  #area
+    box_loss_scale = 2 - y_true[..., 2:3] * y_true[..., 3:4]  # area
 
     # Find ignore mask, iterate over each of batch.
-    ignore_mask = tf.TensorArray(K.dtype(y_true[0]), size=1, dynamic_size=True) # all images label
+    ignore_mask = tf.TensorArray(K.dtype(y_true[0]), size=1, dynamic_size=True)  # all images label
     object_mask_bool = K.cast(object_mask, 'bool')
 
     def loop_body(b, ignore_mask):
-        true_box = tf.boolean_mask(y_true[b, ..., 0:4], object_mask_bool[b, ..., 0]) # object_mask_bool (confidence)
+        true_box = tf.boolean_mask(y_true[b, ..., 0:4], object_mask_bool[b, ..., 0])  # object_mask_bool (confidence)
         iou = box_iou(pred_box[b], true_box)
         best_iou = K.max(iou, axis=-1)
         ignore_mask = ignore_mask.write(b, K.cast(best_iou < ignore_thresh, K.dtype(true_box)))
